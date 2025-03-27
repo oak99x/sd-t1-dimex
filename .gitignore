@@ -2,7 +2,4 @@
 *.txt
 *.out
 *.mod
-
-# module SD
-
-# go 1.18
+*.DS_Store
