@@ -1,5 +1,4 @@
 # Ignore all .txt files
 *.txt
 *.out
-*.mod
 *.DS_Store
