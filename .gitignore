@@ -1,0 +1,8 @@
+# Ignore all .txt files
+*.txt
+*.out
+*.mod
+
+# module SD
+
+# go 1.18
