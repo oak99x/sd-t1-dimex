@@ -185,19 +185,21 @@ func (module *DIMEX_Module) handleUponDeliverRespOk(msgOutro PP2PLink.PP2PLink_I
 	parts := strings.Split(msgOutro.Message, "||")
 	senderId, _ := strconv.Atoi(parts[1])
 
+	module.messageInterceptor(senderId, msgOutro.Message)
+
 	module.nbrResps++
 	if module.nbrResps == len(module.addresses)-1 {
 		module.st = inMX
 		module.Ind <- dmxResp{}
 	}
-
-	module.messageInterceptor(senderId, msgOutro.Message)
 }
 
 func (module *DIMEX_Module) handleUponDeliverReqEntry(msgOutro PP2PLink.PP2PLink_Ind_Message) {
 	parts := strings.Split(msgOutro.Message, "||")
 	senderId, _ := strconv.Atoi(parts[1])
 	senderTs, _ := strconv.Atoi(parts[2])
+
+	module.messageInterceptor(senderId, msgOutro.Message)
 
 	if module.st == noMX || (module.st == wantMX && after(module.id, module.reqTs, senderId, senderTs)) {
 		module.sendToLink(module.addresses[senderId], fmt.Sprintf("respOK||%d||%d", module.id, module.lcl), "     ")
@@ -206,8 +208,6 @@ func (module *DIMEX_Module) handleUponDeliverReqEntry(msgOutro PP2PLink.PP2PLink
 	}
 
 	module.lcl = max(module.lcl, senderTs)
-
-	module.messageInterceptor(senderId, msgOutro.Message)
 }
 
 // ------------------------------------------------------------------------------------
