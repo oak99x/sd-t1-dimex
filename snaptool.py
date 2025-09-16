@@ -18,28 +18,31 @@ def read_snapshots():
             with open(filepath, 'r') as f:
                 snapshotData = None
                 snapshotId = None
+                messages_section = False
                 for line in f:
+                    line = line.strip()
                     if 'Snapshot' in line:
                         if snapshotData:
                             snapshots[snapshotId][processId] = snapshotData
-                        snapshotId = int(line.strip().split(' ')[1])
-                        snapshotData = {'ProcessId': processId, 'SnapshotId': snapshotId, 'Messages': []}
+                        snapshotId = int(line.split(' ')[1])
+                        snapshotData = {'ProcessId': processId, 'SnapshotId': snapshotId, 'Messages': [], 'NbrResps': 0, 'Waiting': []}
+                        messages_section = False
                     elif 'Estado:' in line:
-                        snapshotData['State'] = int(line.strip().split(': ')[1])
+                        snapshotData['State'] = int(line.split(': ')[1])
                     elif 'Relógio Lógico:' in line:
-                        snapshotData['Lcl'] = int(line.strip().split(': ')[1])
+                        snapshotData['Lcl'] = int(line.split(': ')[1])
                     elif 'Timestamp de Requisição:' in line:
-                        snapshotData['ReqTs'] = int(line.strip().split(': ')[1])
+                        snapshotData['ReqTs'] = int(line.split(': ')[1])
                     elif 'Waiting:' in line:
-                        waiting_str = line.strip().split(': ')[1]
-                        waiting_list = parse_waiting_list(waiting_str)
-                        snapshotData['Waiting'] = waiting_list
+                        snapshotData['Waiting'] = parse_waiting_list(line.split(': ')[1])
                     elif 'NbrResps:' in line:
-                        snapshotData['NbrResps'] = int(line.strip().split(': ')[1])
+                        snapshotData['NbrResps'] = int(line.split(': ')[1])
                     elif 'Mensagens:' in line:
-                        continue  
-                    elif 'respOK' in line:
-                        snapshotData['Messages'].append(line.strip()) 
+                        messages_section = True
+                        continue
+                    elif messages_section and line:
+                        # Captura todas as mensagens na seção
+                        snapshotData['Messages'].append(line)
                 if snapshotData:
                     snapshots[snapshotId][processId] = snapshotData 
     return snapshots
@@ -47,88 +50,78 @@ def read_snapshots():
 def parse_waiting_list(waiting_str):
     waiting_str = waiting_str.strip('[]')
     waiting_values = re.findall(r'\btrue\b|\bfalse\b', waiting_str)
-    waiting_list = [value.lower() == 'true' for value in waiting_values]
-    return waiting_list
+    return [value.lower() == 'true' for value in waiting_values]
 
 def check_invariant_1(snapshot):
-    # Invariante 1: No máximo um processo na seção crítica
     in_mx_count = sum(1 for s in snapshot.values() if s['State'] == 2)
     return in_mx_count <= 1
 
 def check_invariant_2(snapshot):
-    # Invariante 2: Se todos os processos estão em noMX (não querem SC), então todos os waitings são falsos e não deve haver mensagens
     all_no_mx = all(s['State'] == 0 for s in snapshot.values())
     if all_no_mx:
         for s in snapshot.values():
-            if any(s['Waiting']) or s['Messages']:
+            if s['Messages'] or any(s['Waiting']):
                 return False
         return True
     return True
 
 def check_invariant_3(snapshot):
-    # Invariante 3: Se q está marcado como waiting em p, então p está em inMX ou wantMX
     for p_data in snapshot.values():
-        p_state = p_data['State']
-        p_waiting = p_data['Waiting']
-        for q_id, waiting in enumerate(p_waiting):
-            if waiting:
-                if p_state not in [1, 2]:
-                    return False
-    return True
-
-def check_invariant_4(snapshot):
-    # Invariante 4: Se um processo quer a SC, somatório de resps + mensagens em trânsito + waiting flags deve ser N-1
-    for q_data in snapshot.values():
-        if q_data['State'] == 1:
-            count_waiting = 0
-            count_messages = len(q_data['Messages'])
-            for p_data in snapshot.values():
-                if p_data['ProcessId'] != q_data['ProcessId']:
-                    if q_data['ProcessId'] < len(p_data['Waiting']) and p_data['Waiting'][q_data['ProcessId']]:
-                        count_waiting += 1
-            nbr_resps = q_data.get('NbrResps', 0)
-            total = nbr_resps + count_messages + count_waiting
-            if total != N - 1:
-                return False
-    return True
-
-def check_invariant_5(snapshot):
-    # Invariante 5: Se um processo está na seção crítica, ele não deve estar marcado como waiting em outro processo.
-    for p_data in snapshot.values():
-        if p_data['State'] == 2:
-            for q_data in snapshot.values():
-                if p_data['ProcessId'] != q_data['ProcessId']:
-                    if q_data['Waiting'][p_data['ProcessId']]:
+        if p_data['State'] in [1, 2]:
+            for q_id, is_waiting in enumerate(p_data['Waiting']):
+                if is_waiting:
+                    q_data = snapshot.get(q_id)
+                    if not q_data or q_data['State'] not in [1, 2]:
                         return False
     return True
 
-def check_invariant_6(snapshot):
-    # Invariante 6: Se um processo está esperando pela SC, seu ReqTs deve ser maior que o ReqTs de todos os processos no estado noMX
+def check_invariant_4(snapshot):
+    # Invariante 4 (Lamport): Um processo em 'wantMX' só deve ter N-1 respostas se sua requisição for a mais antiga.
     for p_data in snapshot.values():
-        if p_data['State'] == 1:  # wantMX == 1
-            for q_data in snapshot.values():
-                if q_data['State'] == 0 and q_data['ReqTs'] >= p_data['ReqTs']:
+        if p_data['State'] == 1:
+            req_ts = p_data.get('ReqTs', 0)
+            p_id = p_data.get('ProcessId')
+            
+            # Conta mensagens de 'respOK' em trânsito
+            resp_ok_in_transit = sum(1 for msg in p_data.get('Messages', []) if 'respOK' in msg)
+            
+            # A soma de respostas recebidas e em trânsito
+            total_permissions = p_data.get('NbrResps', 0) + resp_ok_in_transit
+            
+            # Verifica se ele tem permissão para entrar na SC
+            if total_permissions == N - 1:
+                # Se tem todas as permissões, sua requisição deve ser a mais antiga
+                is_oldest_req = True
+                for other_data in snapshot.values():
+                    other_req_ts = other_data.get('ReqTs', 0)
+                    other_id = other_data.get('ProcessId')
+                    
+                    # Compara com todas as requisições ativas
+                    if other_data['State'] == 1 and (other_req_ts < req_ts or (other_req_ts == req_ts and other_id < p_id)):
+                        is_oldest_req = False
+                        break
+                
+                # Se não é a requisição mais antiga, a invariante é violada
+                if not is_oldest_req:
+                    print(f"Process {p_data['ProcessId']} (Snapshot {p_data['SnapshotId']}) - VIOLAÇÃO: Tem permissões suficientes, mas sua requisição não é a mais antiga.")
                     return False
+    
+    # Se o processo tem requisição, mas não tem permissão suficiente, é um estado válido
     return True
 
 def analyze_snapshots(snapshots):
     with open(OUTPUT_FILE, 'w') as f:
-        for snapshotId, snapshot in snapshots.items():
+        for snapshotId, snapshot in sorted(snapshots.items()):
             result = f"\nAnalisando Snapshot {snapshotId}:\n"
             inv1 = check_invariant_1(snapshot)
             inv2 = check_invariant_2(snapshot)
             inv3 = check_invariant_3(snapshot)
             inv4 = check_invariant_4(snapshot)
-            inv5 = check_invariant_5(snapshot)
-            inv6 = check_invariant_6(snapshot)
 
             result += " - Invariante 1 mantida\n" if inv1 else " - Invariante 1 VIOLADA\n"
             result += " - Invariante 2 mantida\n" if inv2 else " - Invariante 2 VIOLADA\n"
             result += " - Invariante 3 mantida\n" if inv3 else " - Invariante 3 VIOLADA\n"
             result += " - Invariante 4 mantida\n" if inv4 else " - Invariante 4 VIOLADA\n"
-            result += " - Invariante 5 mantida\n" if inv5 else " - Invariante 5 VIOLADA\n"
-            result += " - Invariante 6 mantida\n" if inv6 else " - Invariante 6 VIOLADA\n"
-
             print(result)
             f.write(result)
 

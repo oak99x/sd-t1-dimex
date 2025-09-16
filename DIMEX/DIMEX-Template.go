@@ -15,9 +15,9 @@ import (
 type State int // enumeracao dos estados possiveis de um processo
 
 const (
-	noMX State = iota
-	wantMX
-	inMX
+	noMX State = iota // nao quer entrar na seção critica
+	wantMX //quer entrar na seção critica
+	inMX //esta na seção critica
 )
 
 type dmxReq int // enumeracao dos estados possiveis de um processo
@@ -47,23 +47,23 @@ type DIMEX_Module struct {
 	Pp2plink *PP2PLink.PP2PLink // acesso aa comunicacao enviar por PP2PLinq.Req  e receber por PP2PLinq.Ind
 
 	// Variáveis para Snapshot
-	idSnapShot    int64
-	snapshots       map[int64]*SnapshotState // Map de snapshots com ID do snapshot como chave
-	activeSnapshot  bool                     // Flag indicando se o snapshot está ativo
-	errorInjected bool
-	markersReceived map[int]bool             // Map para rastrear marcadores recebidos
+	activeSnapshot      bool
+    currentSnapshotId   int64
+    nextSnapshotId      int64
+    currentSnapshotState *SnapshotState
+    errorInjected bool
 }
 
 
 type SnapshotState struct {
-	ProcessState State
-	Lcl          int
-	ReqTs        int
-	Waiting      []bool
-	NbrResps     int
-	Recorded     bool
-	ChannelState map[int][]string // Estado dos canais de entrada
-	Messages     []string         // Mensagens recebidas durante o snapshot
+	ProcessState    State
+    Lcl             int
+    ReqTs           int
+    NbrResps        int
+    Recorded        bool
+    ChannelState    map[int][]string // Estado dos canais de entrada (chave: senderId, valor: mensagens)
+    WaitingForMarker map[int]bool // Rastreia os marcadores que ainda faltam
+	WaitingState     []bool // Novo campo para capturar o estado de 'waiting'
 }
 
 
@@ -91,11 +91,12 @@ func NewDIMEX(_addresses []string, _id int, _dbg bool) *DIMEX_Module {
 
 		Pp2plink:  p2p,
 
-		idSnapShot:      0,
-		snapshots:       make(map[int64]*SnapshotState),
-		activeSnapshot:  false,
-		errorInjected:   false,
-		markersReceived: make(map[int]bool),
+		// Inicializa as variáveis do snapshot
+        activeSnapshot:      false,
+        currentSnapshotId:   0, // Nenhum snapshot está ativo no início
+        nextSnapshotId:      1, // O primeiro snapshot terá ID 1
+        currentSnapshotState: nil,
+        errorInjected: false,
 	}
 
 	for i := 0; i < len(dmx.waiting); i++ {
@@ -260,109 +261,111 @@ func (module *DIMEX_Module) outDbg(s string) {
 // ------------------------------------------------------------------------------------
 
 func (module *DIMEX_Module) startSnapshot() {
-	if module.activeSnapshot {
-		fmt.Println("Snapshot já está em andamento.")
-		return
-	}
+    if module.activeSnapshot {
+        fmt.Println("Snapshot já está em andamento.")
+        return
+    }
 
-	snapshotId := module.idSnapShot + 1
+    snapshotId := module.nextSnapshotId
 
-	fmt.Println("Iniciando snapshot com o id: ", snapshotId)
-	
-	// Envia marcador para todos os processos
-	module.sendToLink(module.addresses[module.id], fmt.Sprintf("%s||%d||%d", MARKER, module.id, snapshotId), "     ")
+    // Cria e armazena o novo snapshot
+    snapshotWaitingState := make([]bool, len(module.waiting))
+    copy(snapshotWaitingState, module.waiting)
+
+    module.currentSnapshotState = &SnapshotState{
+        ProcessState:    module.st,
+        Lcl:             module.lcl,
+        ReqTs:           module.reqTs,
+        NbrResps:        module.nbrResps,
+        Recorded:        true,
+        ChannelState:    make(map[int][]string),
+        WaitingForMarker: make(map[int]bool),
+        WaitingState:    snapshotWaitingState, // Captura o estado de 'waiting' no momento do snapshot
+    }
+
+    // Seta o próprio marcador como recebido
+    module.currentSnapshotState.WaitingForMarker[module.id] = true
+    module.activeSnapshot = true
+    module.currentSnapshotId = snapshotId
+    module.nextSnapshotId++
+    
+    fmt.Println("Iniciando snapshot no processo", module.id)
+
+    // Envia marcadores para todos os processos
+    for i := 0; i < len(module.addresses); i++ {
+        if i != module.id {
+            module.sendToLink(module.addresses[i], fmt.Sprintf("%s||%d||%d", MARKER, module.id, snapshotId), "     ")
+        }
+    }
 }
 
 // middleware durante o snapshot
 func (module *DIMEX_Module) messageInterceptor(senderId int, stringMsg string) {
-	if module.activeSnapshot {
-		for _, snapshot := range module.snapshots {
-			if !snapshot.Waiting[senderId] {
-				snapshot.Messages = append(snapshot.Messages, stringMsg)
-			}
-		}
-	}
+	// Verifica se há um snapshot ativo
+    if module.activeSnapshot {
+        snapshot := module.currentSnapshotState
+        
+        // Se ainda não recebeu o marcador deste remetente, grave a mensagem.
+        if !snapshot.WaitingForMarker[senderId] {
+            // Adiciona a mensagem à lista do canal correspondente
+            snapshot.ChannelState[senderId] = append(snapshot.ChannelState[senderId], stringMsg)
+        }
+    }
 }
-
 func (module *DIMEX_Module) handleMarker(msg PP2PLink.PP2PLink_Ind_Message) {
-	senderId, snapshotId := parseMarkerMessage(msg.Message)
+    senderId, snapshotId := parseMarkerMessage(msg.Message)
 
-	// fmt.Println("Recebido marcador de", senderId, "com id", snapshotId)
-	
-	module.idSnapShot = snapshotId
+    if !module.activeSnapshot {
+        fmt.Printf("Processo %d recebeu o primeiro marcador (id %d). Iniciando snapshot.\n", module.id, snapshotId)
 
-	// Verifica se o snapshot já foi gravado
-	if !module.isIdInSnapshot(snapshotId) {
-		module.activeSnapshot = true
-		module.recordState(snapshotId)
-		fmt.Println("-----  ", module.snapshots[snapshotId].Waiting[senderId])
-		fmt.Println("-----  ", senderId)
-		module.snapshots[snapshotId].Waiting[senderId] = true
-		module.outDbg(fmt.Sprintf("Gravando estado de canal de %d.", senderId))
-		
-		// Envia marcador para todos os processos
-		for i := 0; i < len(module.addresses); i++ {
-			if i != module.id {
-				module.sendToLink(module.addresses[i], fmt.Sprintf("%s||%d||%d", MARKER, module.id, snapshotId), "     ")
-			}
-		}
+        snapshotWaitingState := make([]bool, len(module.waiting))
+        copy(snapshotWaitingState, module.waiting)
 
-	} else {
-		// Apenas monitora e para de gravar mensagens do canal quando receber o marcador
-		module.snapshots[snapshotId].Waiting[senderId] = true
-		module.outDbg(fmt.Sprintf("Recebido marcador de volta de %d. Parando gravação para esse canal.", senderId))
-	}
+        module.currentSnapshotState = &SnapshotState{
+            ProcessState:     module.st,
+            Lcl:              module.lcl,
+            ReqTs:            module.reqTs,
+            NbrResps:         module.nbrResps,
+            Recorded:         true,
+            ChannelState:     make(map[int][]string),
+            WaitingForMarker: make(map[int]bool),
+            WaitingState:     snapshotWaitingState, // Captura o estado de 'waiting'
+        }
+        
+        module.currentSnapshotState.WaitingForMarker[module.id] = true
+        module.activeSnapshot = true
+        module.currentSnapshotId = snapshotId
+        
+        for i := 0; i < len(module.addresses); i++ {
+            if i != module.id {
+                module.sendToLink(module.addresses[i], fmt.Sprintf("%s||%d||%d", MARKER, module.id, snapshotId), "     ")
+            }
+        }
+    } else if module.currentSnapshotId != snapshotId {
+        fmt.Printf("Processo %d ignorando marcador (id %d) de outro snapshot. Atual ativo: %d.\n", module.id, snapshotId, module.currentSnapshotId)
+        return
+    }
 
-	// Verifica se todos os marcadores foram recebidos
-	if module.allMarkersReceived(snapshotId) {
-		module.completeSnapshot(snapshotId)
-	}
+    module.currentSnapshotState.WaitingForMarker[senderId] = true
+
+    if module.allMarkersReceived() {
+        module.completeSnapshot()
+    }
 }
 
-func (module *DIMEX_Module) completeSnapshot(snapshotId int64) {
-	module.outDbg(fmt.Sprintf("Snapshot %d completo.", snapshotId))
-	module.activeSnapshot = false
-	module.markersReceived = make(map[int]bool) // Limpa para futuros snapshots
-	module.writeSnapshotToFile(snapshotId)
+func (module *DIMEX_Module) completeSnapshot() {
+	module.outDbg(fmt.Sprintf("Snapshot %d completo. Escrevendo para o arquivo...", module.currentSnapshotId))
+    module.writeSnapshotToFile(module.currentSnapshotId)
+    module.activeSnapshot = false // Limpa a flag de snapshot ativo
+    module.currentSnapshotId = 0
+    module.currentSnapshotState = nil // Limpa o ponteiro para o snapshot
 }
 
-func (module *DIMEX_Module) allMarkersReceived(snapshotId int64) bool {
-	snapshot := module.snapshots[snapshotId]
-	fmt.Println("Snapshot: ", snapshot)
-	fmt.Println("snapshot.Waiting ", snapshot.Waiting)
-	for _, waiting := range snapshot.Waiting {
-		fmt.Println("Waiting ", waiting)
-		if !waiting {
-			return false
-		}
-	}
-	return true
-
+func (module *DIMEX_Module) allMarkersReceived() bool {
+	// A condição de conclusão é receber marcadores de todos os N-1 outros processos
+    return len(module.currentSnapshotState.WaitingForMarker) == len(module.addresses)
 }
 
-func (module *DIMEX_Module) recordState(snapshotId int64) {
-	snapshot := &SnapshotState{
-		ProcessState: module.st,
-		Lcl:          module.lcl,
-		ReqTs:        module.reqTs,
-		Waiting:      []bool{false, false, false},
-		NbrResps:     module.nbrResps,
-		Recorded:     true,
-		ChannelState: make(map[int][]string),
-	}
-	snapshot.Waiting[module.id] = true
-	module.snapshots[snapshotId] = snapshot
-	// module.writeSnapshotToFile(snapshotId)
-}
-
-func (module *DIMEX_Module) isIdInSnapshot(id int64) bool {
-	if module.snapshots != nil {
-		if _, exists := module.snapshots[id]; exists {
-			return true
-		}
-	}
-	return false
-}
 
 func parseMarkerMessage(message string) (int, int64) {
 	fmt.Println("Mensagem recebida:", message)
@@ -384,28 +387,31 @@ func parseMarkerMessage(message string) (int, int64) {
 	fmt.Println("ID do sender:", senderId)
 	return senderId, snapshotId
 }
-
 func (module *DIMEX_Module) writeSnapshotToFile(snapshotId int64) {
-	filename := fmt.Sprintf("./snapshots/process_%d.txt", module.id)
-	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		// fmt.Println("Erro ao abrir/criar arquivo de snapshot:", err)
-		return
-	}
-	defer file.Close()
-	fmt.Println("snapshot id ", snapshotId)
-	snapshot := module.snapshots[snapshotId]
-	file.WriteString(fmt.Sprintf("Snapshot %d\n", snapshotId))
-	file.WriteString(fmt.Sprintf("Estado: %d\n", snapshot.ProcessState))
-	file.WriteString(fmt.Sprintf("Relógio Lógico: %d\n", snapshot.Lcl))
-	file.WriteString(fmt.Sprintf("Timestamp de Requisição: %d\n", snapshot.ReqTs))
-	file.WriteString(fmt.Sprintf("Receive resps: %v\n", snapshot.Waiting))
-	file.WriteString(fmt.Sprintf("Waiting: %v\n", module.waiting))
-	file.WriteString(fmt.Sprintf("NbrResps: %d\n", snapshot.NbrResps))
-	file.WriteString(fmt.Sprintf("Mensagens:\n"))
-	for _, msg := range snapshot.Messages {
-		file.WriteString(fmt.Sprintf("%s\n", msg))
-	}
+    filename := fmt.Sprintf("./snapshots/process_%d.txt", module.id)
+    file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    if err != nil {
+        return
+    }
+    defer file.Close()
+    snapshot := module.currentSnapshotState
+    
+    file.WriteString(fmt.Sprintf("Snapshot %d\n", snapshotId))
+    file.WriteString(fmt.Sprintf("Estado: %d\n", snapshot.ProcessState))
+    file.WriteString(fmt.Sprintf("Relógio Lógico: %d\n", snapshot.Lcl))
+    file.WriteString(fmt.Sprintf("Timestamp de Requisição: %d\n", snapshot.ReqTs))
+    file.WriteString(fmt.Sprintf("Receive resps: %v\n", module.currentSnapshotState.WaitingForMarker))
+    file.WriteString(fmt.Sprintf("Waiting: %v\n", snapshot.WaitingState))
+    file.WriteString(fmt.Sprintf("NbrResps: %d\n", snapshot.NbrResps))
+    file.WriteString(fmt.Sprintf("Mensagens:\n"))
 
-	file.WriteString("\n")
+    // Adiciona as mensagens gravadas por canal ao arquivo
+    for senderID, messages := range snapshot.ChannelState {
+        file.WriteString(fmt.Sprintf("  Canal de %d:\n", senderID))
+        for _, msg := range messages {
+            file.WriteString(fmt.Sprintf("    %s\n", msg))
+        }
+    }
+
+    file.WriteString("\n")
 }
