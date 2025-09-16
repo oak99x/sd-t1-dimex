@@ -51,7 +51,7 @@ type DIMEX_Module struct {
     currentSnapshotId   int64
     nextSnapshotId      int64
     currentSnapshotState *SnapshotState
-    errorInjected bool
+    errorInjected int // Variável para injeção de erro
 }
 
 
@@ -93,10 +93,10 @@ func NewDIMEX(_addresses []string, _id int, _dbg bool) *DIMEX_Module {
 
 		// Inicializa as variáveis do snapshot
         activeSnapshot:      false,
-        currentSnapshotId:   0, // Nenhum snapshot está ativo no início
-        nextSnapshotId:      1, // O primeiro snapshot terá ID 1
+        currentSnapshotId:   0,            // Nenhum snapshot está ativo no início
+        nextSnapshotId:      1,            // O primeiro snapshot terá ID 1
         currentSnapshotState: nil,
-        errorInjected: false,
+        errorInjected: 0,                  // Erro: 0 = nenhum, 1 = Invariante 1, 3, e 4 | 2 = Invariante 1 e 4 | 3 = bug? | 4 = deadlock
 	}
 
 	for i := 0; i < len(dmx.waiting); i++ {
@@ -130,7 +130,6 @@ func (module *DIMEX_Module) Start() {
 				}
 
 			case msgOutro := <-module.Pp2plink.Ind: // vindo de outro processo
-				//fmt.Printf("dimex recebe da rede: ", msgOutro)
 				if strings.Contains(msgOutro.Message, "respOK") {
 					module.outDbg("         <<<---- responde! " + msgOutro.Message)
 					module.handleUponDeliverRespOk(msgOutro) // ENTRADA DO ALGORITMO
@@ -170,7 +169,10 @@ func (module *DIMEX_Module) handleUponReqExit() {
 	for i, addr := range module.addresses {
 		if module.waiting[i] {
 			module.sendToLink(addr, fmt.Sprintf("respOK||%d||%d", module.id, module.lcl), "     ")
-			module.waiting[i] = false
+			// Injeção de erro: Deixa a flag de waiting como true
+			if module.errorInjected != 1 {
+                module.waiting[i] = false
+            }
 		}
 	}
 	module.st = noMX
@@ -189,7 +191,12 @@ func (module *DIMEX_Module) handleUponDeliverRespOk(msgOutro PP2PLink.PP2PLink_I
 	module.messageInterceptor(senderId, msgOutro.Message)
 
 	module.nbrResps++
-	if module.nbrResps == len(module.addresses)-1 {
+
+	 // Injeção de erro: Permite entrada na SC com apenas uma resposta
+	if module.errorInjected == 4 && module.nbrResps == 1 {
+        module.st = inMX
+        module.Ind <- dmxResp{}
+    }else if module.nbrResps == len(module.addresses)-1 {
 		module.st = inMX
 		module.Ind <- dmxResp{}
 	}
@@ -202,8 +209,19 @@ func (module *DIMEX_Module) handleUponDeliverReqEntry(msgOutro PP2PLink.PP2PLink
 
 	module.messageInterceptor(senderId, msgOutro.Message)
 
-	if module.st == noMX || (module.st == wantMX && after(module.id, module.reqTs, senderId, senderTs)) {
+	
+    if module.errorInjected == 2 && module.st == wantMX && !after(module.id, module.reqTs, senderId, senderTs) {
+		// Injeção de erro: Responde a uma requisição mais nova, o que viola a prioridade
+        module.sendToLink(module.addresses[senderId], fmt.Sprintf("respOK||%d||%d", module.id, module.lcl), "     ")
+
+    } else if module.errorInjected == 3 && module.st == inMX {
+		// Injeção de erro: Responde a uma requisição enquanto ainda está em inMX
+        module.sendToLink(module.addresses[senderId], fmt.Sprintf("respOK||%d||%d", module.id, module.lcl), "     ")
+
+    } else if module.st == noMX || (module.st == wantMX && after(module.id, module.reqTs, senderId, senderTs)) {
+
 		module.sendToLink(module.addresses[senderId], fmt.Sprintf("respOK||%d||%d", module.id, module.lcl), "     ")
+
 	} else {
 		module.waiting[senderId] = true
 	}

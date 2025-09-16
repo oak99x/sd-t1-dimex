@@ -44,7 +44,7 @@ def read_snapshots():
                         # Captura todas as mensagens na seção
                         snapshotData['Messages'].append(line)
                 if snapshotData:
-                    snapshots[snapshotId][processId] = snapshotData 
+                    snapshots[snapshotId][processId] = snapshotData
     return snapshots
 
 def parse_waiting_list(waiting_str):
@@ -53,10 +53,12 @@ def parse_waiting_list(waiting_str):
     return [value.lower() == 'true' for value in waiting_values]
 
 def check_invariant_1(snapshot):
+    # Invariante 1: No máximo um processo na seção crítica
     in_mx_count = sum(1 for s in snapshot.values() if s['State'] == 2)
     return in_mx_count <= 1
 
 def check_invariant_2(snapshot):
+    # Invariante 2: Se todos os processos estão em noMX (não querem SC), então todos os waitings são falsos e não deve haver mensagens
     all_no_mx = all(s['State'] == 0 for s in snapshot.values())
     if all_no_mx:
         for s in snapshot.values():
@@ -66,14 +68,16 @@ def check_invariant_2(snapshot):
     return True
 
 def check_invariant_3(snapshot):
+    # Invariante 3: Se q está marcado como waiting em p, então p está em inMX ou wantMX
     for p_data in snapshot.values():
-        if p_data['State'] in [1, 2]:
-            for q_id, is_waiting in enumerate(p_data['Waiting']):
-                if is_waiting:
-                    q_data = snapshot.get(q_id)
-                    if not q_data or q_data['State'] not in [1, 2]:
-                        return False
+        p_state = p_data['State']
+        p_waiting = p_data['Waiting']
+        for q_id, waiting in enumerate(p_waiting):
+            if waiting:
+                if p_state not in [1, 2]:
+                    return False
     return True
+
 
 def check_invariant_4(snapshot):
     # Invariante 4 (Lamport): Um processo em 'wantMX' só deve ter N-1 respostas se sua requisição for a mais antiga.
