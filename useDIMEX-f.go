@@ -36,11 +36,11 @@ func main() {
 	// espera para facilitar inicializacao de todos processos (a mao)
 	time.Sleep(15 * time.Second)
 
-	// Inicia uma goroutine para iniciar snapshots periodicamente a cada 3 segundos
+	// Inicia uma goroutine para iniciar snapshots periodicamente a cada 2 segundos
 	go func() {
 		if 0 == id {
 			for {
-				//random := rand.Intn(3)
+				//random := rand.Intn(2)
 				time.Sleep(2 * time.Second)
 				fmt.Println("[ APP id:", id, "INICIANDO SNAPSHOT ]")
 				dmx.Req <- DIMEX.START_SNAPSHOT
