@@ -13,10 +13,9 @@ Implementação de um algoritmo de exclusão mútua distribuída utilizando o Di
 #### Parte 2 - Snapshot Global (Chandy-Lamport)
 Integração do algoritmo de snapshot ao DiMEx, baseado no algoritmo de Chandy-Lamport discutido em aula.
 
+---
 
-
-
-## Como executar:
+### Como executar:
 Abra três terminais diferentes e execute os seguintes comandos (um em cada terminal):
 
 ```bash
@@ -31,3 +30,17 @@ go run useDIMEX-f.go 2 127.0.0.1:5000 127.0.0.1:6001 127.0.0.1:7002
 - Foi definido um tempo de início de 15 segundos, permitindo que os três comandos sejam executados tranquilamente.
 
 - Após 15 segundos, o sistema starta a troca de mensagens e logo inicia snapshots automáticos a cada 2 segundos (loop de snapshots).
+
+---
+
+### Análise dos Snapshots
+Para analisar os snapshots gerados:
+
+- Pare os processos do Go.
+
+- Em um novo terminal, execute o seguinte comando:
+
+    ```bash
+    python3 snaptool.py
+    ```
+    Esse comando irá gerar o arquivo `snapshot_analysis.txt` com os resultados da análise.
